@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+import socket
 
 ESPAY_USERNAME = os.getenv("ESPAY_USERNAME", "SGWTIEBYMIN")
 ESPAY_PASSWORD = os.getenv("ESPAY_PASSWORD", "HSQANGFD")
@@ -20,7 +21,7 @@ JKT = zoneinfo.ZoneInfo("Asia/Jakarta")
 
 
 class QRRequest(BaseModel):
-    product_code: Literal["OVO", "JENIUS", "QRIS"] = Field(..., description="Gunakan 'QRIS' untuk QR")
+    product_code: Literal["OVO", "JENIUS", "QRIS"] = Field(...)
     order_id: str = Field(..., min_length=1, max_length=20)
     amount: int = Field(..., ge=1)
     customer_id: str = Field(..., min_length=1, max_length=64)
@@ -49,6 +50,14 @@ def make_signature(rq_uuid: str, comm_code: str, product_code: str, order_id: st
     amount_str = str(int(amount))
     raw = f"##{rq_uuid}##{comm_code}##{product_code}##{order_id}##{amount_str}##PUSHTOPAY##{key}##"
     return hashlib.sha256(raw.upper().encode("utf-8")).hexdigest()
+
+
+def resolve_debug(host: str):
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        return [{"family": i[0], "ip": i[4][0]} for i in infos]
+    except Exception as e:
+        return [{"error": str(e)}]
 
 
 app = FastAPI(title="Espay QR Generator", version="1.0")
@@ -104,3 +113,26 @@ async def get_qr(req: QRRequest):
         raise HTTPException(status_code=502, detail=f"Unexpected Espay response: {r.text}")
 
     return JSONResponse(content=data)
+
+
+@app.get("/_health")
+async def health():
+    dns_prod = resolve_debug("api.espay.id")
+    dns_sbox = resolve_debug("sandbox-api.espay.id")
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        try:
+            egress_ip4 = (await c.get("https://api.ipify.org")).text
+        except Exception as e:
+            egress_ip4 = f"error: {e}"
+        try:
+            egress_ip6 = (await c.get("https://api6.ipify.org")).text
+        except Exception as e:
+            egress_ip6 = f"error: {e}"
+    return {
+        "time_jkt": now_str_jkt(),
+        "espay_url": ESPAY_URL,
+        "dns_prod": dns_prod,
+        "dns_sandbox": dns_sbox,
+        "egress_ip_v4": egress_ip4,
+        "egress_ip_v6": egress_ip6,
+    }
