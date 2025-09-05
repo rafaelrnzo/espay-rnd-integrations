@@ -10,12 +10,11 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-ESPAY_USERNAME = os.getenv("ESPAY_USERNAME", "TIEBYMIN")
+ESPAY_USERNAME = os.getenv("ESPAY_USERNAME", "SGWTIEBYMIN")
 ESPAY_PASSWORD = os.getenv("ESPAY_PASSWORD", "HSQANGFD")
 ESPAY_COMM_CODE = os.getenv("ESPAY_COMM_CODE", "SGWTIEBYMIN")
 ESPAY_SECRET_KEY = os.getenv("ESPAY_SECRET_KEY", "tqqj5107obb6ydga")
-
-ESPAY_URL = "https://api.espay.id/rest/digitalpay/pushtopay"
+ESPAY_URL = os.getenv("ESPAY_URL", "https://api.espay.id/rest/digitalpay/pushtopay")
 
 JKT = zoneinfo.ZoneInfo("Asia/Jakarta")
 
@@ -23,7 +22,7 @@ JKT = zoneinfo.ZoneInfo("Asia/Jakarta")
 class QRRequest(BaseModel):
     product_code: Literal["OVO", "JENIUS", "QRIS"] = Field(..., description="Gunakan 'QRIS' untuk QR")
     order_id: str = Field(..., min_length=1, max_length=20)
-    amount: int = Field(..., ge=1, description="Jumlah tagihan (Rp, tanpa desimal)")
+    amount: int = Field(..., ge=1)
     customer_id: str = Field(..., min_length=1, max_length=64)
     description: str = Field(..., min_length=1, max_length=20)
 
@@ -42,19 +41,17 @@ def basic_auth_header(username: str, password: str) -> str:
     return "Basic " + base64.b64encode(raw).decode()
 
 
-def make_signature(
-    rq_uuid: str,
-    comm_code: str,
-    product_code: str,
-    order_id: str,
-    amount: int,
-    key: str,
-) -> str:
-    raw = f"##{rq_uuid}##{comm_code}##{product_code}##{order_id}##{amount}##PUSHTOPAY##{key}##"
+def make_signature(rq_uuid: str, comm_code: str, product_code: str, order_id: str, amount: int, key: str) -> str:
+    rq_uuid = str(rq_uuid).strip()
+    comm_code = str(comm_code).strip()
+    product_code = str(product_code).strip()
+    order_id = str(order_id).strip()
+    amount_str = str(int(amount))
+    raw = f"##{rq_uuid}##{comm_code}##{product_code}##{order_id}##{amount_str}##PUSHTOPAY##{key}##"
     return hashlib.sha256(raw.upper().encode("utf-8")).hexdigest()
 
 
-app = FastAPI(title="Espay QR Generator (Production)", version="1.0")
+app = FastAPI(title="Espay QR Generator", version="1.0")
 
 
 @app.post("/qr", response_model=QRResponse)
@@ -63,7 +60,6 @@ async def get_qr(req: QRRequest):
         raise HTTPException(status_code=500, detail="Konfigurasi ESPAY_* belum lengkap")
 
     rq_uuid = uuid.uuid4().hex.upper()
-
     signature = make_signature(
         rq_uuid=rq_uuid,
         comm_code=ESPAY_COMM_CODE,
@@ -77,12 +73,12 @@ async def get_qr(req: QRRequest):
         "rq_uuid": rq_uuid,
         "rq_datetime": now_str_jkt(),
         "comm_code": ESPAY_COMM_CODE,
-        "order_id": req.order_id,
-        "product_code": req.product_code,
-        "amount": str(req.amount),  
-        "customer_id": req.customer_id,
-        "description": req.description,
-        "signature": signature,   
+        "order_id": req.order_id.strip(),
+        "product_code": req.product_code.strip(),
+        "amount": str(int(req.amount)),
+        "customer_id": req.customer_id.strip(),
+        "description": req.description.strip(),
+        "signature": signature,
     }
 
     headers = {
@@ -98,7 +94,7 @@ async def get_qr(req: QRRequest):
             raise HTTPException(status_code=502, detail=f"Gagal hubungi Espay: {e}")
 
     if r.status_code == 401:
-        raise HTTPException(status_code=401, detail="Unauthorized dari Espay (Basic Auth salah)")
+        raise HTTPException(status_code=401, detail="Unauthorized dari Espay")
     if r.status_code >= 500:
         raise HTTPException(status_code=502, detail=f"Espay error {r.status_code}: {r.text}")
 
