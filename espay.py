@@ -72,9 +72,7 @@ async def get_qr(req: QRRequest):
         "key": ESPAY_SECRET_KEY,
         "description": req.description,
         "customer_id": req.customer_id,
-        "signature": make_signature(
-            rq_uuid, ESPAY_COMM_CODE, req.product_code, req.order_id, req.amount, ESPAY_SECRET_KEY
-        ),
+        "signature": ESPAY_SECRET_KEY
     }
 
     if req.promo_code:
