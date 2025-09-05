@@ -27,4 +27,4 @@ COPY . .
 EXPOSE 8000
 
 # Command default untuk run FastAPI dengan Uvicorn
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8009", "--reload"]
+CMD ["uvicorn", "espay:app", "--host", "0.0.0.0", "--port", "8009", "--reload"]
