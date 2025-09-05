@@ -45,7 +45,7 @@ def now_str_jkt() -> str:
 
 def basic_auth_header(username: str, password: str) -> str:
     raw = f"{username}:{password}".encode()
-    return "Basic " + base64.b64encode(raw).decode()
+    return "BASIC " + base64.b64encode(raw).decode()
 
 
 def make_signature(rq_uuid: str, comm_code: str, product_code: str, order_id: str, amount: int, key: str) -> str:
