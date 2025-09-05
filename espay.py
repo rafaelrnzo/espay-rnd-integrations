@@ -5,7 +5,7 @@ import base64
 from datetime import datetime
 import zoneinfo
 from typing import Optional, Literal
-
+from fastapi.responses import JSONResponse
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -106,5 +106,6 @@ async def get_qr(req: QRRequest):
         data = r.json()
     except Exception:
         raise HTTPException(status_code=502, detail=f"Unexpected Espay response: {r.text}")
-
-    return QRResponse(qr_code=data.get("QRCode"), qr_link=data.get("QRLink"))
+    
+    return JSONResponse(content={"qr_code": data.get("QRCode"), "qr_link": data.get("QRLink")})
+    # return QRResponse(qr_code=data.get("QRCode"), qr_link=data.get("QRLink"))
