@@ -1,111 +1,138 @@
 import os
+import json
 import uuid
-import hashlib
 import base64
-from datetime import datetime
-import zoneinfo
-from typing import Literal
-from fastapi.responses import JSONResponse
 import httpx
+from datetime import datetime, timezone
+import zoneinfo
+from typing import Literal, Optional
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-import socket
-
-ESPAY_USERNAME = os.getenv("ESPAY_USERNAME", "SGWTIEBYMIN")
-ESPAY_PASSWORD = os.getenv("ESPAY_PASSWORD", "HSQANGFD")
-ESPAY_COMM_CODE = os.getenv("ESPAY_COMM_CODE", "SGWTIEBYMIN")
-ESPAY_SECRET_KEY = os.getenv("ESPAY_SECRET_KEY", "tqqj5107obb6ydga")
-ESPAY_URL = os.getenv("ESPAY_URL", "https://api.espay.id/rest/digitalpay/pushtopay")
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 JKT = zoneinfo.ZoneInfo("Asia/Jakarta")
 
+ESPAY_ENV = os.getenv("ESPAY_ENV", "production")
+ESPAY_BASE_URL = (
+    "https://api.espay.id" if ESPAY_ENV == "production" else "https://sandbox-api.espay.id"
+)
+RELATIVE_URL = "/api/v1.0/qr/qr-mpm-generate"
+ESPAY_URL = ESPAY_BASE_URL + RELATIVE_URL
 
-class QRRequest(BaseModel):
-    product_code: Literal["OVO", "JENIUS", "QRIS"] = Field(...)
-    order_id: str = Field(..., min_length=1, max_length=20)
-    amount: int = Field(..., ge=1)
-    customer_id: str = Field(..., min_length=1, max_length=64)
-    description: str = Field(..., min_length=1, max_length=20)
+ESPAY_PARTNER_ID = os.getenv("ESPAY_PARTNER_ID", "SGWTIEBYMIN")   # X-PARTNER-ID
+ESPAY_MERCHANT_ID = os.getenv("ESPAY_MERCHANT_ID", "SGWTIEBYMIN") # body.merchantId
+ESPAY_CHANNEL_ID = os.getenv("ESPAY_CHANNEL_ID", "ESPAY")
+ESPAY_PRIVATE_KEY_PEM = os.getenv("ESPAY_PRIVATE_KEY_PEM", "").encode()
 
-
-class QRResponse(BaseModel):
-    qr_code: str | None = None
-    qr_link: str | None = None
-
-
-def now_str_jkt() -> str:
-    return datetime.now(JKT).strftime("%Y-%m-%d %H:%M:%S")
+app = FastAPI(title="Espay QRIS (Direct API QR MPM)", version="1.0")
 
 
-def basic_auth_header(username: str, password: str) -> str:
-    raw = f"{username}:{password}".encode()
-    return "Basic " + base64.b64encode(raw).decode()
+class Amount(BaseModel):
+    value: str = Field(..., pattern=r"^\d+(\.\d{2})$", description="e.g. 150000.00")
+    currency: Literal["IDR"] = "IDR"
 
 
-def make_signature(rq_uuid: str, comm_code: str, product_code: str, order_id: str, amount: int, key: str) -> str:
-    rq_uuid = str(rq_uuid).strip()
-    comm_code = str(comm_code).strip()
-    product_code = str(product_code).strip()
-    order_id = str(order_id).strip()
-    amount_str = str(int(amount))
-    raw = f"##{rq_uuid}##{comm_code}##{product_code}##{order_id}##{amount_str}##PUSHTOPAY##{key}##"
-    return hashlib.sha256(raw.upper().encode("utf-8")).hexdigest()
+class QRISRequest(BaseModel):
+    partner_reference_no: str = Field(..., min_length=1, max_length=32)
+    amount: Amount
+    product_code: Literal["QRIS"] = "QRIS"
+    validity_period: Optional[str] = Field(None, description="ISO 8601, e.g. 2025-09-05T23:59:00+07:00")
 
 
-def resolve_debug(host: str):
+class EspayQRISResponseTemplate(BaseModel):
+    response_code: str | None = None
+    response_message: str | None = None
+    reference_no: str | None = None
+    partner_reference_no: str | None = None
+    merchant_name: str | None = None
+    amount: str | None = None
+    qr_url: str | None = None
+    qr_content: str | None = None
+    qr_image_base64: str | None = None
+
+
+def now_iso_jkt_seconds() -> str:
+    return datetime.now(JKT).replace(microsecond=0).isoformat()
+
+
+def minify_json(d: dict) -> str:
+    return json.dumps(d, separators=(",", ":"), ensure_ascii=False)
+
+
+def sha256_hex_lower(s: str) -> str:
+    from hashlib import sha256
+    return sha256(s.encode("utf-8")).hexdigest().lower()
+
+
+def load_private_key(pem_bytes: bytes):
+    if not pem_bytes:
+        raise HTTPException(status_code=500, detail="ESPAY_PRIVATE_KEY_PEM tidak di-set")
     try:
-        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-        return [{"family": i[0], "ip": i[4][0]} for i in infos]
+        return serialization.load_pem_private_key(pem_bytes, password=None)
     except Exception as e:
-        return [{"error": str(e)}]
+        raise HTTPException(status_code=500, detail=f"Private key invalid: {e}")
 
 
-app = FastAPI(title="Espay QR Generator", version="1.0")
-
-
-@app.post("/qr", response_model=QRResponse)
-async def get_qr(req: QRRequest):
-    if not (ESPAY_USERNAME and ESPAY_PASSWORD and ESPAY_COMM_CODE and ESPAY_SECRET_KEY):
-        raise HTTPException(status_code=500, detail="Konfigurasi ESPAY_* belum lengkap")
-
-    rq_uuid = uuid.uuid4().hex.upper()
-    signature = make_signature(
-        rq_uuid=rq_uuid,
-        comm_code=ESPAY_COMM_CODE,
-        product_code=req.product_code,
-        order_id=req.order_id,
-        amount=req.amount,
-        key=ESPAY_SECRET_KEY,
+def sign_rsa_sha256_b64(private_key, message: str) -> str:
+    signature = private_key.sign(
+        message.encode("utf-8"),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
     )
+    return base64.b64encode(signature).decode()
 
-    payload = {
-        "rq_uuid": rq_uuid,
-        "rq_datetime": now_str_jkt(),
-        "comm_code": ESPAY_COMM_CODE,
-        "order_id": req.order_id.strip(),
-        "product_code": req.product_code.strip(),
-        "amount": str(int(req.amount)),
-        "customer_id": req.customer_id.strip(),
-        "description": req.description.strip(),
-        "signature": signature,
+
+def make_x_signature(http_method: str, relative_url: str, body: dict, x_timestamp: str) -> str:
+    body_min = minify_json(body)
+    body_hash = sha256_hex_lower(body_min)
+    string_to_sign = f"{http_method}:{relative_url}:{body_hash}:{x_timestamp}"
+    pk = load_private_key(ESPAY_PRIVATE_KEY_PEM)
+    return sign_rsa_sha256_b64(pk, string_to_sign)
+
+
+def make_external_id() -> str:
+    today = datetime.now(JKT).strftime("%Y%m%d")
+    rand = uuid.uuid4().int % (10**16)
+    return f"{today}{rand:016d}"[:32]
+
+
+@app.post("/qris/generate")
+async def generate_qris(req: QRISRequest):
+    x_timestamp = now_iso_jkt_seconds()
+
+    body = {
+        "partnerReferenceNo": req.partner_reference_no,
+        "merchantId": ESPAY_MERCHANT_ID,
+        "amount": {"value": req.amount.value, "currency": req.amount.currency},
+        "additionalInfo": {"productCode": req.product_code},
     }
+    if req.validity_period:
+        body["validityPeriod"] = req.validity_period
+
+    x_signature = make_x_signature("POST", RELATIVE_URL, body, x_timestamp)
 
     headers = {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Accept": "*/*",
-        "Authorization": basic_auth_header(ESPAY_USERNAME, ESPAY_PASSWORD),
+        "Content-Type": "application/json",
+        "X-TIMESTAMP": x_timestamp,
+        "X-SIGNATURE": x_signature,
+        "X-EXTERNAL-ID": make_external_id(),
+        "X-PARTNER-ID": ESPAY_PARTNER_ID,
+        "CHANNEL-ID": ESPAY_CHANNEL_ID,
     }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0)) as client:
         try:
-            r = await client.post(ESPAY_URL, data=payload, headers=headers)
+            r = await client.post(ESPAY_URL, headers=headers, json=body)
         except httpx.RequestError as e:
             raise HTTPException(status_code=502, detail=f"Gagal hubungi Espay: {e}")
 
-    if r.status_code == 401:
-        raise HTTPException(status_code=401, detail="Unauthorized dari Espay")
+    content_type = r.headers.get("content-type", "")
     if r.status_code >= 500:
         raise HTTPException(status_code=502, detail=f"Espay error {r.status_code}: {r.text}")
+    if "application/json" not in content_type:
+        raise HTTPException(status_code=502, detail=f"Unexpected content-type: {content_type}")
 
     try:
         data = r.json()
@@ -115,24 +142,53 @@ async def get_qr(req: QRRequest):
     return JSONResponse(content=data)
 
 
-@app.get("/_health")
-async def health():
-    dns_prod = resolve_debug("api.espay.id")
-    dns_sbox = resolve_debug("sandbox-api.espay.id")
-    async with httpx.AsyncClient(timeout=10.0) as c:
-        try:
-            egress_ip4 = (await c.get("https://api.ipify.org")).text
-        except Exception as e:
-            egress_ip4 = f"error: {e}"
-        try:
-            egress_ip6 = (await c.get("https://api6.ipify.org")).text
-        except Exception as e:
-            egress_ip6 = f"error: {e}"
-    return {
-        "time_jkt": now_str_jkt(),
-        "espay_url": ESPAY_URL,
-        "dns_prod": dns_prod,
-        "dns_sandbox": dns_sbox,
-        "egress_ip_v4": egress_ip4,
-        "egress_ip_v6": egress_ip6,
+@app.post("/qris/generate/template", response_model=EspayQRISResponseTemplate)
+async def generate_qris_template(req: QRISRequest):
+    x_timestamp = now_iso_jkt_seconds()
+
+    body = {
+        "partnerReferenceNo": req.partner_reference_no,
+        "merchantId": ESPAY_MERCHANT_ID,
+        "amount": {"value": req.amount.value, "currency": req.amount.currency},
+        "additionalInfo": {"productCode": req.product_code},
     }
+    if req.validity_period:
+        body["validityPeriod"] = req.validity_period
+
+    x_signature = make_x_signature("POST", RELATIVE_URL, body, x_timestamp)
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-TIMESTAMP": x_timestamp,
+        "X-SIGNATURE": x_signature,
+        "X-EXTERNAL-ID": make_external_id(),
+        "X-PARTNER-ID": ESPAY_PARTNER_ID,
+        "CHANNEL-ID": ESPAY_CHANNEL_ID,
+    }
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0)) as client:
+        try:
+            r = await client.post(ESPAY_URL, headers=headers, json=body)
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"Gagal hubungi Espay: {e}")
+
+    if r.status_code >= 500:
+        raise HTTPException(status_code=502, detail=f"Espay error {r.status_code}: {r.text}")
+
+    try:
+        data = r.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail=f"Unexpected Espay response: {r.text}")
+
+    tmpl = EspayQRISResponseTemplate(
+        response_code=data.get("responseCode"),
+        response_message=data.get("responseMessage"),
+        reference_no=(data.get("additionalInfo") or {}).get("referenceNo"),
+        partner_reference_no=(data.get("additionalInfo") or {}).get("partnerReferenceNo"),
+        merchant_name=(data.get("additionalInfo") or {}).get("merchantName"),
+        amount=(data.get("additionalInfo") or {}).get("amount"),
+        qr_url=data.get("qrUrl"),
+        qr_content=data.get("qrContent"),
+        qr_image_base64=data.get("qrImage"),
+    )
+    return tmpl
