@@ -107,5 +107,5 @@ async def get_qr(req: QRRequest):
     except Exception:
         raise HTTPException(status_code=502, detail=f"Unexpected Espay response: {r.text}")
     
-    return JSONResponse(content={"qr_code": data.get("QRCode"), "qr_link": data.get("QRLink")})
+    return JSONResponse(content=data)
     # return QRResponse(qr_code=data.get("QRCode"), qr_link=data.get("QRLink"))
