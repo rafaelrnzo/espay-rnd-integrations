@@ -4,7 +4,7 @@ import hashlib
 import base64
 from datetime import datetime
 import zoneinfo
-from typing import Optional, Literal
+from typing import Literal
 from fastapi.responses import JSONResponse
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -14,7 +14,6 @@ ESPAY_USERNAME = os.getenv("ESPAY_USERNAME", "TIEBYMIN")
 ESPAY_PASSWORD = os.getenv("ESPAY_PASSWORD", "HSQANGFD")
 ESPAY_COMM_CODE = os.getenv("ESPAY_COMM_CODE", "SGWTIEBYMIN")
 ESPAY_SECRET_KEY = os.getenv("ESPAY_SECRET_KEY", "tqqj5107obb6ydga")
-ESPAY_ENV = "production"
 
 ESPAY_URL = "https://api.espay.id/rest/digitalpay/pushtopay"
 
@@ -27,15 +26,11 @@ class QRRequest(BaseModel):
     amount: int = Field(..., ge=1, description="Jumlah tagihan (Rp, tanpa desimal)")
     customer_id: str = Field(..., min_length=1, max_length=64)
     description: str = Field(..., min_length=1, max_length=20)
-    promo_code: Optional[str] = Field(None, max_length=64)
-    is_sync: int = Field(0, ge=0, le=1, description="1=Sync, 0=Async (default 0)")
-    branch_id: Optional[str] = Field(None, max_length=64)
-    pos_id: Optional[str] = Field(None, max_length=64)
 
 
 class QRResponse(BaseModel):
-    qr_code: Optional[str] = None
-    qr_link: Optional[str] = None
+    qr_code: str | None = None
+    qr_link: str | None = None
 
 
 def now_str_jkt() -> str:
@@ -67,7 +62,8 @@ async def get_qr(req: QRRequest):
     if not (ESPAY_USERNAME and ESPAY_PASSWORD and ESPAY_COMM_CODE and ESPAY_SECRET_KEY):
         raise HTTPException(status_code=500, detail="Konfigurasi ESPAY_* belum lengkap")
 
-    rq_uuid = uuid.uuid4().hex.upper()  # unique request id (format bebas)
+    rq_uuid = uuid.uuid4().hex.upper()
+
     signature = make_signature(
         rq_uuid=rq_uuid,
         comm_code=ESPAY_COMM_CODE,
@@ -81,21 +77,13 @@ async def get_qr(req: QRRequest):
         "rq_uuid": rq_uuid,
         "rq_datetime": now_str_jkt(),
         "comm_code": ESPAY_COMM_CODE,
-        "product_code": req.product_code,
         "order_id": req.order_id,
-        "amount": str(req.amount),   
-        "description": req.description,
+        "product_code": req.product_code,
+        "amount": str(req.amount),  
         "customer_id": req.customer_id,
+        "description": req.description,
         "signature": signature,   
     }
-
-    if req.promo_code:
-        payload["promo_code"] = req.promo_code
-    payload["is_sync"] = str(req.is_sync)
-    if req.branch_id:
-        payload["branch_id"] = req.branch_id
-    if req.pos_id:
-        payload["pos_id"] = req.pos_id
 
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
